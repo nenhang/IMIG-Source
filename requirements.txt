@@ -1,0 +1,8 @@
+diffusers<=0.34.0   # for compatibility with dreamo
+openai
+accelerate
+protobuf
+sentencepiece
+peft
+onnxruntime-gpu
+insightface

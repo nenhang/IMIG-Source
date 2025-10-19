@@ -1,0 +1,15 @@
+torch==2.6.0
+torchvision==0.21.0
+protobuf
+optimum-quanto==0.2.7
+einops
+timm
+diffusers==0.33.1
+transformers==4.45.2
+sentencepiece
+gradio
+spaces
+huggingface_hub
+accelerate==0.32.0
+peft
+git+https://github.com/ToTheBeginning/facexlib.git
