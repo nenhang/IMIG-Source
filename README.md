@@ -64,7 +64,7 @@ In our implementation, we use [FLUX family](https://github.com/black-forest-labs
             ├── ...
     ```
 
-4. If you want to use the prompt generation feature based on Deepseek, please register an account on [Deepseek](https://deepseek.ai/) and get your API key. Then fill in the `DEEPSEEK_API_KEY` field in `environ_config_template.py`.
+4. If you want to use the prompt generation feature based on DeepSeek, please register an account on [DeepSeek](https://platform.deepseek.com/api_keys) and get your API key. Then fill in the `DEEPSEEK_API_KEY` field in `environ_config_template.py`.
 
 5. After finishing the above steps, please rename `environ_config_template.py` to `environ_config.py`:
 
