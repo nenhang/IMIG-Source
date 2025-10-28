@@ -1,14 +1,16 @@
 # IMIG-Source
 
-This repository is the official implementation of the generation code for the IMIG-Dataset proposed in paper [**ContextGen: Contextual Layout Anchoring for Identity-Consistent Multi-Instance Generation**](https://arxiv.org/abs/2510.11000). The main repository for the paper is at [here](https://github.com/nenhang/ContextGen).
+![Dataset Sample](./docs/dataset_sample.webp)
+
+This repository is the official implementation of the generation code for the IMIG-Dataset proposed in paper [**ContextGen: Contextual Layout Anchoring for Identity-Consistent Multi-Instance Generation**](https://arxiv.org/abs/2510.11000). The IMIG-Dataset is a large-scale, structured dataset designed for identity-consistent **I**mage-guided **M**ulti-instance **G**eneration tasks, featuring progressive difficulty levels. The main repository for the paper is at [here](https://github.com/nenhang/ContextGen).
 
 ## 🛠️ Setup
 
-In our implementation, we use [FLUX family](https://github.com/black-forest-labs/flux) and [DreamO](https://github.com/bytedance/DreamO) as image generation models, [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) and [DeRIS](https://github.com/Dmmm1997/DeRIS) as object detection and segmentation tools. For these tools requires a much older version of CUDA and PyTorch, while those image generation models require newer ones. Therefore, we are supposed to set up two independent conda environments.
+In our implementation, we use [FLUX family](https://github.com/black-forest-labs/flux), [DreamO](https://github.com/bytedance/DreamO) and [MOSAIC](https://github.com/bytedance-fanqie-ai/MOSAIC) as image generation models, [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) and [DeRIS](https://github.com/Dmmm1997/DeRIS) as object detection and segmentation tools. For these tools requires a much older version of CUDA and PyTorch, while those image generation models require newer ones. Therefore, we are supposed to set up two independent conda environments.
 
 > Note: Environment setup for GroundingDINO and DeRIS may encounter issues. If you face any problems, please **refer to their original repositories**.
 
-1. Create the first conda environment `imig-gen` for FLUX family and Dreamo, which requires CUDA 12+.
+1. Create the first conda environment `imig-gen` for FLUX family and Dreamo, which requires torch ~= 2.6.
 
     ```bash
     conda create -n imig-gen python=3.10 -y
@@ -19,24 +21,24 @@ In our implementation, we use [FLUX family](https://github.com/black-forest-labs
 
     pip install https://github.com/nunchaku-tech/nunchaku/releases/download/v0.3.2/nunchaku-0.3.2+torch2.6-cp310-cp310-linux_x86_64.whl
 
-    cd ../GroundingDINO
-    pip install -e .
-
     cd ../../
     pip install -r requirements.txt
     ```
 
     > if you encounter issues when installing GroundingDINO using `pip install -e .`, such as `ModuleNotFoundError: No module named 'pip'`, you can try installing with `pip install -e . --no-build-isolation --config-settings editable_mode=strict`.
 
-2. Create the second conda environment `imig-tool` for DeRIS, which requires CUDA 11.8. You may need to switch CUDA (or NVCC) versions when installing this environment.
+2. Create the second conda environment `imig-tool` for DeRIS, which requires torch ~= 2.0 and a lower CUDA version (like 11.8). You may need to switch CUDA (or NVCC) versions if you find CUDA 12+ incompatible with DeRIS.
 
     ```bash
-    conda create -n imig-tool python=3.8 -y
+    conda create -n imig-tool python=3.10 -y
     conda activate imig-tool
 
     pip install torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 --index-url https://download.pytorch.org/whl/cu118
 
-    cd third_party/DeRIS
+    cd third_party/GroundingDINO
+    pip install -e .
+
+    cd ../DeRIS
     pip install mmcv-full==1.7.2 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
     pip install -r requirements.txt
     cd deris/models/branchs/perception_branch/Mask2Former_Simplify/modeling/pixel_decoder/ops
@@ -78,7 +80,7 @@ In our implementation, we use [FLUX family](https://github.com/black-forest-labs
 
 ### Overview
 
-For the basic and complex sub-datasets, we use the same codebase (`src/generate_dataset.py` and `src/generate_prompts.py`) with some adjustable parameters to achieve different generation effects. And for the flexible sub-dataset, we provide an example of generating images with two subjects (`src/generate_composite_dataset.py` and `src/generate_composite_prompts.py`), and you can modify the code for more subjects.
+For the basic and complex sub-datasets, we use the same codebase (`src/generate_dataset.py` and `src/generate_prompts.py`) with some adjustable parameters to achieve different generation effects. And for the flexible sub-dataset, we provide an example of generating images with 2-5 subjects (`src/generate_composite_dataset.py` and `src/generate_composite_prompts.py`), and you can modify the code for more subjects.
 
 ### Prompts Generation
 
@@ -109,7 +111,7 @@ The generation code will restore scan the current generation results, so you can
 
 #### Flexible Sub-dataset
 
-To generate the sub-dataset with two subjects, please run the following command step by step:
+To generate the sub-dataset with multiple subjects, please run the following command step by step:
 
 ```bash
 bash ./scripts/generate_composite_dataset.sh
@@ -126,6 +128,10 @@ You can modify the parameters in the main functions of `src/generate_dataset.py`
 ### LLM Prompt Generation Templates
 
 In `src/generate_prompts.py`, you can replace the function call of `generate_initial_prompt_2` in function `llm_prompt_generator` with `generate_initial_prompt` to generate much simpler prompts. Feel free to customize the `GENERATION_RULES` and `EXAMPLE_FORMATS` variables to create your own prompt generation templates. Check the code for more details.
+
+### Image Models for Generation
+
+In our approach, we all use FLUX-DiT based models for image generation. You can easily replace them with other models in the code. For example, if you want to use other cutting-edge composition models, you can implement their `load_pipeline` and `generate_composite_image` function and place them in `src/model_api` directory. Then you can replace the corresponding function import and function calls in `src/generate_composite_dataset.py` to use your own models.
 
 ### FLUX.1-Kontext Editing Templates
 

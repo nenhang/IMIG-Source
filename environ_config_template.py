@@ -2,10 +2,10 @@
 # And configure other necessary environment variables.
 
 # basic sub-dataset save path
-DATASET_DIR = "/root/autodl-tmp/mig-dataset/imig-basic"
+DATASET_DIR = "/root/autodl-tmp/IMIG-Dataset/imig-basic"
 
 # composite sub-dataset save path
-DATASET_DIR_2 = "/root/autodl-tmp/mig-dataset/imig-composite"
+DATASET_DIR_2 = "/root/autodl-tmp/IMIG-Dataset/imig-composite"
 
 # https://huggingface.co/black-forest-labs/FLUX.1-dev
 FLUX_PATH = "/root/autodl-tmp/ckpt/FLUX.1-dev"
@@ -23,6 +23,9 @@ NUNCHAKU_FLUX_KONTEXT_PATH = (
 
 # https://huggingface.co/ByteDance/DreamO
 DREAMO_MODEL_PATH = "/root/autodl-tmp/ckpt/DreamO"
+
+# https://huggingface.co/ByteDance-FanQie/MOSAIC optional if you want to use MOSAIC model
+MOSAIC_MODEL_PATH = "/root/autodl-tmp/ckpt/MOSAIC"
 
 # https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
 GROUNDINGDINO_CKPT_PATH = "/root/autodl-tmp/ckpt/GroundingDINO/groundingdino_swint_ogc.pth"

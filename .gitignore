@@ -208,3 +208,4 @@ marimo/_lsp/
 __marimo__/
 
 environ_config.py
+third_party/GroundingDINO/groundingdino/config

@@ -1,9 +1,9 @@
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -17,15 +17,18 @@ from environ_config import (
     DATASET_DIR_2,
     DINO_MODEL_ROOT,
     FACE_MODEL_ROOT,
+    FACEXLIB_MODEL_ROOT,
     FLUX_PATH,
     FLUX_TURBO_PATH,
     GROUNDINGDINO_CKPT_PATH,
 )
-from src.utils.cal import normed_cxcywh_to_pixel_xyxy
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+SAVE_FORMAT = "jpg"
 
 
-def generate_images_work_process(prompts, image_save_dir, batch_size=16, gpu_id=None, use_turbo=True):
-    assert gpu_id is not None
+def generate_images_work_process(prompts, image_save_dir, batch_size=16, gpu_id=0, use_turbo=True):
     torch.cuda.set_device(gpu_id)
     device = torch.device(f"cuda:{gpu_id}")
     from diffusers import FluxPipeline
@@ -40,7 +43,17 @@ def generate_images_work_process(prompts, image_save_dir, batch_size=16, gpu_id=
     )
     for i in tqdm(range(0, len(prompts), batch_size), desc=f"GPU {gpu_id} processing"):
         prompt_batch = prompts[i : i + batch_size]
-        prompt = [p["prompt"] for p in prompt_batch]
+        # filter out the alreay existing images
+        # prompt = [p["prompt"] for p in prompt_batch]
+        prompt = [
+            p["prompt"]
+            for p in prompt_batch
+            if not os.path.exists(
+                os.path.join(image_save_dir, f"{p['image_index']:06d}_{p['reference_index']}.{SAVE_FORMAT}")
+            )
+        ]
+        if len(prompt) == 0:
+            continue
         with torch.no_grad():
             imgs = model(
                 prompt=prompt,
@@ -49,7 +62,7 @@ def generate_images_work_process(prompts, image_save_dir, batch_size=16, gpu_id=
                 num_inference_steps=12 if use_turbo else 28,
             ).images
         for j, img in enumerate(imgs):
-            file_name = f"{prompt_batch[j]['image_index']:06d}_{prompt_batch[j]['reference_index']}.png"
+            file_name = f"{prompt_batch[j]['image_index']:06d}_{prompt_batch[j]['reference_index']}.{SAVE_FORMAT}"
             img.save(os.path.join(image_save_dir, file_name))
 
 
@@ -89,59 +102,54 @@ def parallel_generate_images(
         p.join()
 
 
-def get_objects(image, prompt, model):
-    from groundingdino.util.inference import load_image as dino_load_image
-    from groundingdino.util.inference import predict
-
-    image_source, image = dino_load_image(image)
-    with torch.no_grad():
-        bboxes, logits, phrases = predict(
-            model=model,
-            image=image,
-            caption=prompt + " .",
-            box_threshold=0.35,
-            text_threshold=0.25,
-            device="cuda",
-        )
-    if len(bboxes) == 0:
-        return None
-    elif len(bboxes) == 1:
-        return bboxes[0]
-    else:
-        sorted_indices = torch.argsort(logits, descending=True)
-        bboxes = bboxes[sorted_indices]
-        return bboxes[0]
-
-
-def crop_images(items, image_dir, output_dir, gpu_id=0):
+def segment_reference_images(items, image_dir, output_dir, gpu_id=0):
     torch.cuda.set_device(gpu_id)
+
     from groundingdino.config import GroundingDINO_SwinT_OGC
-    from groundingdino.util.inference import load_model
 
-    dino_model = load_model(GroundingDINO_SwinT_OGC.__file__, GROUNDINGDINO_CKPT_PATH, device="cuda")
-    for item in tqdm(items, desc=f"GPU {gpu_id} cropping images"):
-        image_path = os.path.join(image_dir, f"{item['image_index']:06d}_{item['reference_index']}.png")
-        image = Image.open(image_path).convert("RGB")
-        image_width, image_height = image.size
-        phrase = item["prompt"]
-        bbox = get_objects(image, phrase, dino_model)
-        if bbox is None:
-            print(f"No objects found for {phrase} in image {image_path}, copying original image.")
-            output_path = os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}.png")
-            image.save(output_path)
+    from src.utils.grounded_deris import GroundedDeris
+
+    grounded_deris_model = GroundedDeris(
+        groundingdino_model_config=GroundingDINO_SwinT_OGC.__file__,
+        groundingdino_model_path=GROUNDINGDINO_CKPT_PATH,
+        deris_model_type="refcoco",
+        device=f"cuda:{gpu_id}",
+    )
+
+    for item in tqdm(items, desc=f"GPU {gpu_id} segmenting reference images"):
+        image_path = os.path.join(image_dir, f"{item['image_index']:06d}_{item['reference_index']}.{SAVE_FORMAT}")
+        expression = item["prompt"]
+        result = grounded_deris_model.get_segmentation(image_path, expression)
+        if result is None:
+            print(f"No segmentation found for {expression} in image {image_path}, skipping.")
             continue
-        bbox = normed_cxcywh_to_pixel_xyxy(
-            bbox,
-            width=image_width,
-            height=image_height,
-            return_dtype="tuple",
-        )[0]
-        cropped_image = image.crop(bbox)
-        output_path = os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}.png")
-        cropped_image.save(output_path)
+        mask = result["masks"][0].astype(np.uint8) * 255  # take the first mask
+        if SAVE_FORMAT == "png":
+            # use add alpha channel to store mask
+            mask_pil = Image.fromarray(mask, mode="L")
+            cropped_image = result["cropped_images"][0]
+            cropped_image.putalpha(mask_pil)
+            cropped_image.save(
+                os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}.{SAVE_FORMAT}")
+            )
+        else:
+            mask_pil = Image.fromarray(mask, mode="L").convert("1")
+            mask_pil.save(os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}_mask.png"))
+            cropped_image = result["cropped_images"][0]
+            cropped_image.save(
+                os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}.{SAVE_FORMAT}")
+            )
+            masked_image = Image.composite(
+                cropped_image,
+                Image.new("RGB", cropped_image.size, (255, 255, 255)),
+                mask_pil,
+            )
+            masked_image.save(
+                os.path.join(output_dir, f"{item['image_index']:06d}_{item['reference_index']}_masked.{SAVE_FORMAT}")
+            )
 
 
-def parallel_crop_images(
+def parallel_segment_reference_images(
     items,
     image_dir,
     output_dir,
@@ -169,7 +177,7 @@ def parallel_crop_images(
         if not items_chunk:
             continue
         p = multiprocessing.Process(
-            target=crop_images,
+            target=segment_reference_images,
             args=(items_chunk, image_dir, output_dir, gpu_id),
         )
         p.start()
@@ -178,26 +186,86 @@ def parallel_crop_images(
         p.join()
 
 
-def annotate_images(items, image_dir, ref_image_dir, annotated_image_save_dir, gpu_id=0, process_id=0):
+def annotate_images(
+    items,
+    image_dir,
+    ref_image_dir,
+    annotated_image_save_dir,
+    masked_instance_save_dir,
+    aligned_face_save_dir,
+    gpu_id=0,
+    process_id=0,
+):
     torch.cuda.set_device(gpu_id)
     import insightface
+    from facexlib.utils.face_restoration_helper import FaceRestoreHelper
     from groundingdino.config import GroundingDINO_SwinT_OGC
-    from groundingdino.util.inference import load_model
+    from transformers import AutoImageProcessor, AutoModel
 
-    from src.utils.image_process import annotate
+    from src.utils.cal import norm_bbox_to_tensor
+    from src.utils.face_helper import get_align_face
+    from src.utils.grounded_deris import GroundedDeris
+    from src.utils.image_process import (
+        annotate,
+        get_masked_dino_features,
+        get_masked_dino_features_batch,
+    )
 
-    dino_model = load_model(GroundingDINO_SwinT_OGC.__file__, GROUNDINGDINO_CKPT_PATH, device="cuda")
-    face_model = insightface.app.FaceAnalysis(root=FACE_MODEL_ROOT, providers=["CUDAExecutionProvider"])
-    face_model.prepare(ctx_id=int(gpu_id), det_size=(640, 640))
+    face_model = insightface.app.FaceAnalysis(root=FACE_MODEL_ROOT, providers=["CPUExecutionProvider"])
+    face_model.prepare(ctx_id=-1, det_size=(512, 512))
+    grounded_deris_model = GroundedDeris(
+        groundingdino_model_config=GroundingDINO_SwinT_OGC.__file__,
+        groundingdino_model_path=GROUNDINGDINO_CKPT_PATH,
+        device="cuda",
+    )
+    face_restore_helper = FaceRestoreHelper(
+        upscale_factor=1,
+        face_size=512,
+        crop_ratio=(1, 1),
+        det_model="retinaface_resnet50",
+        save_ext="png",
+        device="cuda",
+        model_rootpath=FACEXLIB_MODEL_ROOT,
+    )
+    dino_model = AutoModel.from_pretrained(DINO_MODEL_ROOT).to(device="cuda")
+    dino_processor = AutoImageProcessor.from_pretrained(DINO_MODEL_ROOT)
     for item in tqdm(items, desc=f"GPU {gpu_id}, process {process_id} annotating images"):
         item["bbox"] = []
         item["face_bbox"] = []
         bboxes_for_annotation = []
         phrases_for_annotation = []
-        image_path = os.path.join(image_dir, f"{item['index']:06d}.png")
+        image_path = os.path.join(image_dir, f"{item['index']:06d}.{SAVE_FORMAT}")
         for i, instance in enumerate(item["instance"]):
-            ref_image_path = os.path.join(ref_image_dir, f"{item['index']:06d}_{i}_masked.png")
-            ref_image = Image.open(ref_image_path).convert("RGB")
+            ref_image_path = os.path.join(ref_image_dir, f"{item['index']:06d}_{i}_masked.{SAVE_FORMAT}")
+            if SAVE_FORMAT == "png":
+                # add white background according to alpha channel
+                ref_image = Image.open(ref_image_path).convert("RGBA")
+                ref_image_np = np.array(ref_image)
+                ref_mask = ref_image_np[..., 3] > 127
+                ref_image_with_white_bg = ref_image_np[..., :3] * (ref_image_np[..., [3]] / 255.0) + 255 * (
+                    1 - ref_image_np[..., [3]] / 255.0
+                )
+                ref_image = Image.fromarray(ref_image_with_white_bg.astype("uint8"))
+            else:
+                ref_image = Image.open(ref_image_path).convert("RGB")
+                ref_mask_path_prefix = os.path.join(
+                    ref_image_dir,
+                    f"{item['index']:06d}_{i}",
+                )
+                if os.path.exists(ref_mask_path_jpg := f"{ref_mask_path_prefix}_mask.{SAVE_FORMAT}"):
+                    ref_mask = np.array(Image.open(ref_mask_path_jpg).convert("L")) > 127
+                else:
+                    assert os.path.exists(ref_mask_path_png := f"{ref_mask_path_prefix}_mask.png")
+                    ref_mask = np.array(Image.open(ref_mask_path_png).convert("L")) > 127
+
+            ref_features = get_masked_dino_features(
+                dino_model=dino_model,
+                dino_processor=dino_processor,
+                image_pil=ref_image,
+                mask_np=ref_mask,
+                device="cuda",
+            )
+
             faces = face_model.get(np.array(ref_image))
             if len(faces) > 0:
                 ref_face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
@@ -205,73 +273,181 @@ def annotate_images(items, image_dir, ref_image_dir, annotated_image_save_dir, g
             else:
                 ref_face = None
 
-            image = Image.open(image_path).convert("RGB")
-            bbox = get_objects(image, instance, dino_model)
-            if bbox is None:
+            model_output = grounded_deris_model.get_segmentation(image_path, instance)
+
+            if not model_output:
                 print(f"No objects found for {instance} in image {image_path}")
                 item["bbox"].append(None)
+                item["face_bbox"].append(None)
                 continue
+            bboxes = model_output["bboxes"]
+            cropped_images = model_output["cropped_images"]
+            masks = model_output["masks"]
 
-            bbox_list = normed_cxcywh_to_pixel_xyxy(
-                bbox,
-                width=image.width,
-                height=image.height,
-                return_dtype="list",
-            )[0]
-            bbox_normed_tensor = normed_cxcywh_to_pixel_xyxy(
-                bbox,
-                width=image.width,
-                height=image.height,
-                return_dtype="tensor",
-            )[1]
-            bboxes_for_annotation.append(bbox_normed_tensor)
-            phrases_for_annotation.append(instance)
-            item["bbox"].append(bbox_list)
+            instance_features = get_masked_dino_features_batch(
+                dino_model=dino_model,
+                dino_processor=dino_processor,
+                image_pil_list=cropped_images,
+                mask_np_list=[mask.astype(bool) for mask in masks],
+                device="cuda",
+            )
 
+            # sort by cosine similarity
+            similarities = (
+                torch.nn.functional.cosine_similarity(ref_features, instance_features, dim=-1).cpu().numpy().tolist()
+            )
+
+            # filter out low similarity bboxes
+            threshold = 0.5
+            filtered_sorted = sorted(
+                (
+                    (bbox, sim, mask, cropped_image)
+                    for bbox, sim, mask, cropped_image in zip(bboxes, similarities, masks, cropped_images)
+                    if sim >= threshold
+                ),
+                key=lambda x: x[1],  # 按相似度排序
+                reverse=True,
+            )
+            bboxes, similarities, masks, cropped_images = zip(*filtered_sorted) if filtered_sorted else ([], [], [], [])
+
+            # round bboxes to int list
+            bboxes = [[round(x) for x in bbox] for bbox in bboxes]
+
+            bbox_info = (
+                {
+                    "bbox": bboxes[0],
+                    "score": similarities[0],
+                }
+                if bboxes
+                else None
+            )
+            bbox = bboxes[0] if bboxes else None
+            mask_ = masks[0] if masks else None
+            cropped_image_ = cropped_images[0] if cropped_images else None
+
+            face_info = None
+            image = Image.open(image_path).convert("RGB")
             if ref_face is not None:
                 target_faces = face_model.get(np.array(image))
-                if len(target_faces) > 0:
-                    target_face = max(
-                        target_faces,
-                        key=lambda x: np.dot(x.normed_embedding, ref_face.normed_embedding),
+                if target_faces:
+                    best_face, best_score = max(
+                        ((face, np.dot(face.normed_embedding, ref_face.normed_embedding)) for face in target_faces),
+                        key=lambda x: x[1],
                     )
-                    # if target face bbox is not in the corresponding object bbox, skip
-                    target_face_bbox = target_face.bbox
-                    target_face_bbox_list = target_face_bbox.tolist()
-                    if not (
-                        target_face_bbox_list[0] >= bbox_list[0]
-                        and target_face_bbox_list[1] >= bbox_list[1]
-                        and target_face_bbox_list[2] <= bbox_list[2]
-                        and target_face_bbox_list[3] <= bbox_list[3]
-                    ):
-                        print(
-                            f"Warning: Detected face not in bounding box for {instance} in image {image_path}, skipping face bbox."
+                    if best_score > 0.4:
+                        # check if there's bbox in bboxes that contains the best_face bbox
+                        best_face_bbox = best_face.bbox
+                        containing_bboxes_indices = [
+                            idx
+                            for idx, b in enumerate(bboxes)
+                            if b[0] <= best_face_bbox[0]
+                            and b[1] <= best_face_bbox[1]
+                            and b[2] >= best_face_bbox[2]
+                            and b[3] >= best_face_bbox[3]
+                        ]
+                        if containing_bboxes_indices:
+                            # choose the one with highest similarity score
+                            best_containing_idx, _ = max(
+                                [(idx, similarities[idx]) for idx in containing_bboxes_indices], key=lambda x: x[1]
+                            )
+                            bbox = bboxes[best_containing_idx]
+                            bbox_info = {
+                                "bbox": bbox,
+                                "score": similarities[best_containing_idx],
+                            }
+                            mask_ = masks[best_containing_idx]
+                            cropped_image_ = cropped_images[best_containing_idx]
+
+                        else:
+                            print(f"Face Detected but no containing bbox for {instance} in image {image_path}")
+                            bbox_info = None
+
+                        # get aligned face for reference image
+                        aligned_face = get_align_face(
+                            face_restore_helper, np.array(ref_image), mask=ref_mask.astype(np.uint8) * 255
                         )
-                        item["face_bbox"].append(None)
-                        continue
-                    item["face_bbox"].append(
-                        {
+                        if aligned_face is not None:
+                            # convert to PIL image
+                            aligned_face_pil = Image.fromarray(aligned_face.astype(np.uint8))
+                            face_save_path = os.path.join(
+                                aligned_face_save_dir,
+                                f"{item['index']:06d}_{i}_aligned_face.png",  # force to save as png to avoid compression artifacts
+                            )
+                            aligned_face_pil.save(face_save_path)
+
+                        # convert background to white according to Alpha channel, original aligned face is in (h, w, 4) RGBA format
+                        aligned_face_bbox = None
+                        if aligned_face is not None:
+                            aligned_face_with_white_bg = (
+                                aligned_face[..., :3] * (aligned_face[..., [3]] / 255.0)
+                                + 255 * (1 - aligned_face[..., [3]] / 255.0)
+                            ).astype("uint8")
+                            aligned_face_detected = face_model.get(aligned_face_with_white_bg)
+                            if aligned_face_detected:
+                                aligned_face_best = max(
+                                    aligned_face_detected,
+                                    key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]),
+                                )
+                                aligned_face_bbox = aligned_face_best.bbox
+                            else:
+                                print(f"No face detected in aligned face for {instance} in image {image_path}")
+
+                        face_info = {
                             "ref": [round(x) for x in ref_face_bbox.tolist()],
-                            "target": [round(x) for x in target_face_bbox.tolist()],
-                            "score": float(np.dot(target_face.normed_embedding, ref_face.normed_embedding)),
+                            "target": [round(x) for x in best_face_bbox.tolist()],
+                            "score": float(best_score),
+                            "aligned_face_bbox": [round(x) for x in aligned_face_bbox.tolist()]
+                            if aligned_face_bbox is not None
+                            else None,
                         }
+
+            item["bbox"].append(bbox_info)
+            item["face_bbox"].append(face_info)
+
+            if bbox_info is not None:
+                bbox_tensor = norm_bbox_to_tensor(bbox, image.width, image.height)
+                bboxes_for_annotation.append(bbox_tensor)
+                phrases_for_annotation.append(instance)
+
+            if face_info is not None:
+                face_bbox_tensor = norm_bbox_to_tensor(
+                    best_face_bbox,
+                    image.width,
+                    image.height,
+                )
+                bboxes_for_annotation.append(face_bbox_tensor)
+                phrases_for_annotation.append(f"{instance} (face)")
+
+            # save mask and cropped image
+            if bbox_info is not None:
+                assert mask_ is not None and cropped_image_ is not None
+                assert mask_.shape == cropped_image_.size[::-1], "Mask and cropped image size mismatch"
+                mask_save_path = os.path.join(
+                    masked_instance_save_dir,
+                    f"{item['index']:06d}_{i}_mask.png",
+                )
+                mask_pil = Image.fromarray((mask_ * 255).astype(np.uint8)).convert("1")
+                mask_pil.save(mask_save_path)
+                cropped_image_save_path = os.path.join(
+                    masked_instance_save_dir,
+                    f"{item['index']:06d}_{i}.{SAVE_FORMAT}",
+                )
+                cropped_image_.save(cropped_image_save_path)
+                # also save a white bg version
+                cropped_image_with_white_bg = Image.new("RGB", cropped_image_.size, (255, 255, 255))
+                cropped_image_with_white_bg.paste(cropped_image_, mask=mask_pil)
+                cropped_image_with_white_bg.save(
+                    os.path.join(
+                        masked_instance_save_dir,
+                        f"{item['index']:06d}_{i}_masked.{SAVE_FORMAT}",
                     )
-                    target_face_bbox_normed = target_face_bbox / np.array(
-                        [image.width, image.height, image.width, image.height]
-                    )
-                    target_face_bbox_normed = torch.tensor(target_face_bbox_normed, dtype=torch.float32)
-                    bboxes_for_annotation.append(target_face_bbox_normed)
-                    phrases_for_annotation.append(f"{instance} (face)")
-                else:
-                    item["face_bbox"].append(None)
-            else:
-                item["face_bbox"].append(None)
+                )
 
         if len(bboxes_for_annotation) > 0:
             image_source = np.array(Image.open(image_path).convert("RGB"))
             bboxes_for_annotation = torch.stack([bbox for bbox in bboxes_for_annotation if bbox is not None])
             annotated_image = annotate(image_source, bboxes_for_annotation, phrases_for_annotation)[..., ::-1]
-            annotated_image_save_path = os.path.join(annotated_image_save_dir, f"{item['index']:06d}.png")
+            annotated_image_save_path = os.path.join(annotated_image_save_dir, f"{item['index']:06d}.{SAVE_FORMAT}")
             Image.fromarray(annotated_image).save(annotated_image_save_path)
 
     return items
@@ -282,6 +458,8 @@ def parallel_annotate_images(
     image_dir,
     ref_image_dir,
     annotated_image_save_dir,
+    masked_instance_save_dir,
+    aligned_face_save_dir,
     num_processes=None,
 ):
     import multiprocessing
@@ -304,7 +482,16 @@ def parallel_annotate_images(
     results = pool.starmap(
         annotate_images,
         [
-            (items_chunk, image_dir, ref_image_dir, annotated_image_save_dir, i % num_gpus, i)
+            (
+                items_chunk,
+                image_dir,
+                ref_image_dir,
+                annotated_image_save_dir,
+                masked_instance_save_dir,
+                aligned_face_save_dir,
+                i % num_gpus,
+                i,
+            )
             for i, items_chunk in enumerate(items_chunks)
         ],
     )
@@ -320,122 +507,7 @@ def parallel_annotate_images(
     return prompts_with_bboxes
 
 
-def get_masked_dino_features(dino_model, dino_processor, image_pil, mask_np, device="cuda"):
-    image_tensor = dino_processor(images=image_pil, return_tensors="pt").to(device)
-    with torch.inference_mode():
-        features = dino_model(**image_tensor).last_hidden_state
-
-    image_features = features[:, 1:, :]
-
-    num_patches = image_features.shape[1]
-    patch_grid_size = int(num_patches**0.5)
-
-    if isinstance(mask_np, np.ndarray) and mask_np.dtype == bool:
-        mask_np = mask_np.astype(np.float32)
-
-    mask_resized = cv2.resize(mask_np, (patch_grid_size, patch_grid_size), interpolation=cv2.INTER_NEAREST)
-    mask_tensor = torch.tensor(mask_resized, dtype=torch.bool).to(device)
-
-    mask_expanded = mask_tensor.reshape(1, patch_grid_size * patch_grid_size, 1)
-    masked_features = image_features[mask_expanded.expand_as(image_features)]
-
-    global_feature = masked_features.view(-1, image_features.shape[-1]).mean(dim=0, keepdim=True)
-
-    return global_feature
-
-
-def cal_dino_score(prompts, ref_image_dir, ref_mask_dir, target_image_dir, target_mask_dir, gpu_id=0):
-    dino_model_root = DINO_MODEL_ROOT
-    from transformers import AutoImageProcessor, AutoModel
-
-    torch.cuda.set_device(gpu_id)
-    dino_model = AutoModel.from_pretrained(dino_model_root).to(device="cuda")
-    dino_processor = AutoImageProcessor.from_pretrained(dino_model_root)
-
-    for p in tqdm(prompts, desc=f"GPU {gpu_id} calculating DINO scores"):
-        p["dino_score"] = []
-        for i in range(len(p["instance_prompt"])):
-            ref_image_path = os.path.join(ref_image_dir, f"{p['index']:06d}_{i}.png")
-            ref_mask_path = os.path.join(ref_mask_dir, f"{p['index']:06d}_{i}_masked.png")
-            target_image_path = os.path.join(target_image_dir, f"{p['index']:06d}_{i}.png")
-            target_mask_path = os.path.join(target_mask_dir, f"{p['index']:06d}_{i}_masked.png")
-
-            if not os.path.exists(target_image_path) or not os.path.exists(target_mask_path):
-                p["dino_score"].append(None)
-                continue
-
-            ref_image = Image.open(ref_image_path).convert("RGB")
-            ref_mask = np.array(Image.open(ref_mask_path).convert("RGBA").split()[-1]) > 0
-
-            target_image = Image.open(target_image_path).convert("RGB")
-            target_mask = np.array(Image.open(target_mask_path).convert("RGBA").split()[-1]) > 0
-
-            # check if masks are empty
-            if np.sum(ref_mask) == 0:
-                print(f"Warning: Empty reference mask for {p['index']:06d}_{i}, skipping DINO score calculation.")
-                p["dino_score"].append(None)
-                continue
-            if np.sum(target_mask) == 0:
-                print(f"Empty target mask for {p['index']:06d}_{i}, using full image as target.")
-                target_mask = np.ones_like(target_mask, dtype=bool)
-
-            ref_feature = get_masked_dino_features(dino_model, dino_processor, ref_image, ref_mask)
-            target_feature = get_masked_dino_features(dino_model, dino_processor, target_image, target_mask)
-
-            score = torch.cosine_similarity(ref_feature, target_feature).item()
-            if np.isnan(score):
-                print(f"Warning: NaN score for {p['index']:06d}_{i}, setting score to 0.0")
-                score = None
-            p["dino_score"].append(score)
-
-    return prompts
-
-
-def parallel_cal_dino_score(
-    prompts,
-    ref_image_dir,
-    ref_mask_dir,
-    target_image_dir,
-    target_mask_dir,
-    num_processes=None,
-):
-    import multiprocessing
-
-    num_gpus = torch.cuda.device_count()
-    num_processes = num_processes if num_processes is not None else num_gpus
-
-    chunk_size = len(prompts) // num_processes + 1
-    prompts_chunks = [prompts[i : i + chunk_size] for i in range(0, len(prompts), chunk_size)]
-
-    try:
-        torch.multiprocessing.set_start_method("spawn", force=True)
-    except RuntimeError:
-        print("Warning: 'spawn' start method already set, continuing...")
-
-    print(f"Using {num_processes} processes for parallel DINO score calculation")
-
-    pool = multiprocessing.Pool(processes=num_processes)
-
-    results = pool.starmap(
-        cal_dino_score,
-        [
-            (prompts_chunk, ref_image_dir, ref_mask_dir, target_image_dir, target_mask_dir, i % num_gpus)
-            for i, prompts_chunk in enumerate(prompts_chunks)
-        ],
-    )
-
-    pool.close()
-    pool.join()
-
-    prompts_with_scores = []
-    for result in results:
-        prompts_with_scores.extend(result)
-
-    prompts_with_scores.sort(key=lambda x: x["index"])
-    return prompts_with_scores
-
-
-def filter_prompts(prompts, dino_score_threshold, face_score_threshold):
+def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_valid_instance_count=2):
     from torchvision.ops import box_iou
 
     print(f"Read {len(prompts)} prompts for filtering")
@@ -451,55 +523,70 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold):
     # filter prompts with None in bbox
     for p in tqdm(prompts, desc="Filtering None bboxes and calculating initial average scores"):
         contain_face = False
-        # filter not detected bboxes
-        if "bbox" not in p or "bbox" in p and any(b is None for b in p["bbox"]):
+        if "bbox" not in p or "face_bbox" not in p:
+            print(f"Prompt {p['index']} does not have bbox or face_bbox, skipping.")
             continue
+
         # filter overlap bboxes
         if "bbox" in p:
-            bboxes = [torch.tensor(b) for b in p["bbox"] if b is not None]
+            bboxes = p["bbox"]
             for i in range(len(bboxes)):
+                if bboxes[i] is None or len(bboxes[i]) != 4:
+                    continue
+                box1 = torch.tensor(bboxes[i]["bbox"]).unsqueeze(0)
                 for j in range(i + 1, len(bboxes)):
-                    box1 = bboxes[i].unsqueeze(0)
-                    box2 = bboxes[j].unsqueeze(0)
+                    if bboxes[j] is None or len(bboxes[j]) != 4:
+                        continue
+                    box2 = torch.tensor(bboxes[j]["bbox"]).unsqueeze(0)
                     iou = box_iou(box1, box2)[0, 0].item()
                     if iou > 0.75:
-                        break
-            if iou > 0.75:
-                continue
-        # filter None in dino_score
-        if "dino_score" not in p or "dino_score" in p and any(score is None for score in p["dino_score"]):
+                        # choose the one whose score is higher and set the other to None
+                        if bboxes[i]["score"] >= bboxes[j]["score"]:
+                            bboxes[j] = None
+                        else:
+                            bboxes[i] = None
+                        print(f"Removed overlapping bboxes with IoU {iou:.2f} in prompt {p['index']}")
+
+        # filter overlap face bboxes
+        if "face_bbox" in p:
+            face_bboxes = p["face_bbox"]
+            for i in range(len(face_bboxes)):
+                if face_bboxes[i] is None or len(face_bboxes[i]) != 4:
+                    continue
+                box1 = torch.tensor(face_bboxes[i]["target"]).unsqueeze(0)
+                for j in range(i + 1, len(face_bboxes)):
+                    if face_bboxes[j] is None or len(face_bboxes[j]) != 4:
+                        continue
+                    box2 = torch.tensor(face_bboxes[j]["target"]).unsqueeze(0)
+                    iou = box_iou(box1, box2)[0, 0].item()
+                    if iou > 0.5:
+                        # choose the one whose score is higher and set the other to None
+                        if face_bboxes[i]["score"] >= face_bboxes[j]["score"]:
+                            face_bboxes[j] = None
+                        else:
+                            face_bboxes[i] = None
+                        print(f"Removed overlapping face bboxes with IoU {iou:.2f} in prompt {p['index']}")
+
+        # check if the number of obj and face of difference instances are adiquate
+        assert len(p["bbox"]) == len(p["face_bbox"]), "Number of bboxes and instance prompts do not match"
+        valid_instance_count = 0
+        for i, (bbox, face_bbox) in enumerate(zip(p["bbox"], p["face_bbox"])):
+            if bbox is not None or face_bbox is not None:
+                valid_instance_count += 1
+        if valid_instance_count < min_valid_instance_count:
             continue
 
-        if "dino_score" in p:
-            for score in p["dino_score"]:
-                if score is not None:
-                    sum_dino_score += score
-                    obj_count += 1
+        # add scores
+        for bbox in p["bbox"]:
+            if bbox is not None and bbox["score"] is not None:
+                sum_dino_score += bbox["score"]
+                obj_count += 1
 
-        if "face_bbox" in p:
-            valid_face_scores = []
-            valid_face_bbox = []
-            for face_info, bbox in zip(p["face_bbox"], p["bbox"]):
-                if face_info is not None and face_info["score"] is not None and bbox is not None:
-                    target_bbox = face_info["target"]
-                    if (
-                        target_bbox[0] >= bbox[0]
-                        and target_bbox[1] >= bbox[1]
-                        and target_bbox[2] <= bbox[2]
-                        and target_bbox[3] <= bbox[3]
-                    ):
-                        valid_face_scores.append(face_info["score"])
-                        valid_face_bbox.append(face_info)
-
-                        sum_face_score += face_info["score"]
-                        face_count += 1
-                        contain_face = True
-                    else:
-                        valid_face_scores.append(0.0)
-                        valid_face_bbox.append(None)
-                else:
-                    valid_face_bbox.append(None)
-            p["face_bbox"] = valid_face_bbox
+        for fb in p["face_bbox"]:
+            if fb is not None and fb["score"] is not None:
+                sum_face_score += fb["score"]
+                face_count += 1
+                contain_face = True
 
         if contain_face:
             item_with_face += 1
@@ -526,22 +613,36 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold):
         filtered_prompts,
         desc=f"Filtering prompts with dino threshold {dino_score_threshold} and face threshold {face_score_threshold}",
     ):
-        if any(score is None or score < dino_score_threshold for score in p["dino_score"]):
+        available_indices = []
+        contain_face = False
+        for i, (bbox, face_bbox) in enumerate(zip(p["bbox"], p["face_bbox"])):
+            if (
+                bbox is not None
+                and bbox["score"] >= dino_score_threshold
+                or face_bbox is not None
+                and face_bbox["score"] >= face_score_threshold
+            ):
+                available_indices.append(i)
+        if len(available_indices) < min_valid_instance_count:
             continue
-        sum_dino_score += sum(score for score in p["dino_score"])
-        obj_count += len(p["dino_score"])
-        if any(
-            fb is not None and (fb["score"] is None or fb["score"] < face_score_threshold)
-            for fb in p.get("face_bbox", [])
-            if fb is not None
-        ):
-            continue
-        sum_face_score += sum(face["score"] for face in p.get("face_bbox", []) if face is not None)
-        face_count += sum(1 for face in p.get("face_bbox", []) if face is not None)
-        if "face_bbox" in p and any(fb is not None for fb in p["face_bbox"]):
+
+        # filter bboxes and cal new scores
+        p["bbox"] = [p["bbox"][i] if i in available_indices else None for i in range(len(p["bbox"]))]
+        p["face_bbox"] = [p["face_bbox"][i] if i in available_indices else None for i in range(len(p["face_bbox"]))]
+        for i, (bbox, face_bbox) in enumerate(zip(p["bbox"], p["face_bbox"])):
+            if bbox is not None:
+                sum_dino_score += bbox["score"]
+                obj_count += 1
+            if face_bbox is not None:
+                sum_face_score += face_bbox["score"]
+                face_count += 1
+                contain_face = True
+
+        if contain_face:
             item_with_face += 1
         else:
             item_wo_face += 1
+
         filtered_prompts_2.append(p)
     filtered_prompts = filtered_prompts_2
 
@@ -552,6 +653,31 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold):
     )
 
     return filtered_prompts
+
+
+def generate_composite_images(reference_image_dir, composite_image_save_dir, items: list, gpu_id=0):
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f"cuda:{gpu_id}")
+
+    # You may choose from other models if you complement the corresponding API in src/model_api
+    # from src.model_api.dreamo import load_pipeline, generate_composite_image
+    from src.model_api.mosaic import generate_composite_image, load_pipeline
+
+    pipeline = load_pipeline(device=device)
+
+    for item in tqdm(items, desc=f"GPU {gpu_id} generating composite images"):
+        idx_str = str(item["index"]).zfill(6)
+        ref_paths = []
+        for i in range(len(item["instance_prompt"])):
+            ref_path = f"{reference_image_dir}/{idx_str}_{i}.{SAVE_FORMAT}"
+            ref_paths.append(ref_path)
+        composite_image = generate_composite_image(
+            pipeline,
+            ref_image_paths=ref_paths,
+            prompt=item["prompt"],
+        )
+        save_path = f"{composite_image_save_dir}/{item['index']:06d}.{SAVE_FORMAT}"
+        composite_image.save(save_path)
 
 
 def parallel_generate_composite_images(
@@ -573,13 +699,11 @@ def parallel_generate_composite_images(
     chunk_size = (len(items) + num_gpus - 1) // num_gpus
     processes = []
 
-    from src.utils.generate_dataset_dreamo import generate_dataset_images
-
     for i in range(num_gpus):
         chunk = items[i * chunk_size : (i + 1) * chunk_size]
         if chunk:
             p = pool.apply_async(
-                generate_dataset_images, args=(reference_image_dir, composite_image_save_dir, chunk, i)
+                generate_composite_images, args=(reference_image_dir, composite_image_save_dir, chunk, i)
             )
             processes.append(p)
     for p in processes:
@@ -616,7 +740,7 @@ def segment_images(packed_prompts, image_dir, masked, batch_size=64, gpu_id=None
         for item in batch_items:
             idx_str = str(item["image_index"]).zfill(6)
             reference_index = str(item["reference_index"])
-            image_path = f"{image_dir}/{idx_str}_{reference_index}.png"
+            image_path = f"{image_dir}/{idx_str}_{reference_index}.{SAVE_FORMAT}"
             images.append(image_path)
             expressions.append(item["prompt"])
 
@@ -632,45 +756,21 @@ def segment_images(packed_prompts, image_dir, masked, batch_size=64, gpu_id=None
         for i, (image, mask) in enumerate(zip(images, pred_masks)):
             save_path = f"{masked}/{batch_items[i]['image_index']:06d}_{batch_items[i]['reference_index']}"
             pred_np = np.array(mask * 255, dtype=np.uint8)
-            ref_image = Image.open(image).convert("RGBA")
-            ref_image.putalpha(Image.fromarray(pred_np))
-            ref_image.save(f"{save_path}_masked.png")
+            if SAVE_FORMAT == "png":
+                mask_pil = Image.fromarray(pred_np).convert("L")
+                ref_image = Image.open(image).convert("RGBA")
+                ref_image.putalpha(mask_pil)
+                ref_image.save(f"{save_path}_masked.png")
+            else:
+                mask_pil = Image.fromarray(pred_np).convert("1")
+                mask_pil.save(f"{save_path}_mask.png")
+                ref_image = Image.open(image).convert("RGB")
+                white_bg = Image.new("RGB", ref_image.size, (255, 255, 255))
+                masked_image = Image.composite(ref_image, white_bg, mask_pil)
+                masked_image.save(f"{save_path}_masked.{SAVE_FORMAT}")
 
     # restore working directory
     os.chdir(cur_dir)
-
-
-def parallel_segment_images(packed_prompts, image_save_dir, masked_image_save_dir, batch_size=64, num_gpus=None):
-    from multiprocessing import Process
-
-    if num_gpus is None:
-        num_gpus = torch.cuda.device_count()
-    try:
-        torch.multiprocessing.set_start_method("spawn", force=True)
-    except RuntimeError:
-        print("Warning: 'spawn' start method already set, continuing...")
-    print(f"Using {num_gpus} GPUs for parallel segmentation")
-
-    # Split the packed prompts into chunks for each GPU
-    chunk_size = len(packed_prompts) // num_gpus
-    prompt_chunks = []
-    for i in range(num_gpus):
-        start_idx = i * chunk_size
-        end_idx = (i + 1) * chunk_size if i < num_gpus - 1 else len(packed_prompts)
-        prompt_chunks.append(packed_prompts[start_idx:end_idx])
-    print(f"Split prompts into {len(prompt_chunks)} chunks for parallel processing")
-
-    processes = []
-    for gpu_idx in range(num_gpus):
-        p = Process(
-            target=segment_images,
-            args=(prompt_chunks[gpu_idx], image_save_dir, masked_image_save_dir, batch_size, gpu_idx),
-        )
-        processes.append(p)
-        p.start()
-
-    for p in processes:
-        p.join()
 
 
 def pack_prompts(
@@ -683,12 +783,12 @@ def pack_prompts(
 ):
     packed_prompts = []
     if task == "generate_reference_images":
-        for prompt in prompts:
+        for prompt in tqdm(prompts):
             for i, p in enumerate(prompt["instance_prompt"]):
-                if image_save_dir is not None and os.path.exists(
-                    os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}.png")
-                ):
-                    continue
+                # if image_save_dir is not None and os.path.exists(
+                #     os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}.{SAVE_FORMAT}")
+                # ):
+                #     continue
                 packed_prompts.append(
                     {
                         "image_index": prompt["index"],
@@ -699,12 +799,12 @@ def pack_prompts(
 
     elif task == "crop_reference_images":
         assert image_save_dir is not None, "image_save_dir must be provided for cropping images"
-        for prompt in prompts:
+        for prompt in tqdm(prompts):
             for i, p in enumerate(prompt["instance"]):
-                if not os.path.exists(os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}.png")):
+                if not os.path.exists(os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}.{SAVE_FORMAT}")):
                     continue
                 if cropped_image_save_dir is not None and os.path.exists(
-                    os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}.png")
+                    os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}.{SAVE_FORMAT}")
                 ):
                     continue
                 packed_prompts.append(
@@ -718,53 +818,73 @@ def pack_prompts(
     elif task == "generate_composite_images":
         assert image_save_dir is not None, "image_save_dir must be provided for generating composite images"
         processed_images = set(os.listdir(image_save_dir))
-        for prompt in prompts:
-            has_all_references = True
-            for i in range(len(prompt["instance"])):
-                if f"{prompt['index']:06d}.png" not in processed_images:
-                    ref_image_path = os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}_masked.png")
-                    if not os.path.exists(ref_image_path):
-                        has_all_references = False
-                        break
+        for prompt in tqdm(prompts):
+            if f"{prompt['index']:06d}.{SAVE_FORMAT}" in processed_images:
+                continue
+            if not all(
+                os.path.exists(os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}_masked.{SAVE_FORMAT}"))
+                for i in range(len(prompt["instance"]))
+            ):
+                continue
+            num_available_references = 0
+            for i, instance in enumerate(prompt["instance"]):
+                has_available_reference = True
+                ref_image_path = os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}_masked.{SAVE_FORMAT}")
+                if SAVE_FORMAT == "png":
                     ref_image_mask = Image.open(ref_image_path).convert("RGBA").split()[-1]
-                    if np.all(np.array(ref_image_mask) == 0):
-                        print(
-                            f"Reference image mask is empty for {prompt['index']:06d}_{i}, skipping composite generation."
-                        )
-                        has_all_references = False
-                        break
-            if has_all_references:
+                    if np.all(np.array(ref_image_mask) < 128):
+                        print(f"Reference image mask is empty for {instance} in {prompt['index']:06d}_{i}.")
+                        has_available_reference = False
+                elif SAVE_FORMAT == "jpg":
+                    base_path = os.path.join(image_save_dir, f"{prompt['index']:06d}_{i}_mask")
+                    ref_mask_path = f"{base_path}.jpg" if os.path.exists(f"{base_path}.jpg") else f"{base_path}.png"
+                    assert os.path.exists(ref_mask_path)
+                    if np.all(np.array(Image.open(ref_mask_path).convert("L")) < 128):
+                        print(f"Reference image mask is empty for {instance} in {prompt['index']:06d}_{i}.")
+                        has_available_reference = False
+
+                if has_available_reference:
+                    num_available_references += 1
+
+            if num_available_references >= 2:
                 packed_prompts.append(prompt)
+            else:
+                print(
+                    f"Not enough available reference images for prompt index {prompt['index']:06d}, skipping composite generation."
+                )
 
     elif task == "annotate_images":
         assert composite_image_save_dir is not None, "composite_image_save_dir must be provided for cropping images"
-        for prompt in prompts:
-            if not os.path.exists(os.path.join(composite_image_save_dir, f"{prompt['index']:06d}.png")):
+        for prompt in tqdm(prompts):
+            if not os.path.exists(os.path.join(composite_image_save_dir, f"{prompt['index']:06d}.{SAVE_FORMAT}")):
                 continue
             packed_prompts.append(prompt)
 
     elif task == "crop_composite_images":
         assert image_save_dir is not None, "image_save_dir must be provided for cropping images"
-        for prompt in prompts:
-            if not os.path.exists(os.path.join(image_save_dir, f"{prompt['index']:06d}.png")):
+        for prompt in tqdm(prompts):
+            if not os.path.exists(os.path.join(image_save_dir, f"{prompt['index']:06d}.{SAVE_FORMAT}")):
                 continue
             # if all the cropped images already exist, skip
             if cropped_image_save_dir is not None and all(
-                os.path.exists(os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}.png"))
+                os.path.exists(os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}.{SAVE_FORMAT}"))
                 for i in range(len(prompt["instance"]))
             ):
                 continue
             packed_prompts.append(prompt)
 
-    elif task == "segment_reference_images" or task == "segment_instance_images":
+    elif task == "segment_instance_images":
         assert masked_image_save_dir is not None, "masked_image_save_dir must be provided for segmenting images"
         for prompt in prompts:
             for i, p in enumerate(prompt["instance"]):
                 if (
-                    cropped_image_save_dir is not None
-                    and os.path.exists(os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}_mask.png"))
-                    and os.path.exists(os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}_masked.png"))
-                    or not os.path.exists(os.path.join(masked_image_save_dir, f"{prompt['index']:06d}_{i}.png"))
+                    masked_image_save_dir is not None
+                    and os.path.exists(
+                        os.path.join(masked_image_save_dir, f"{prompt['index']:06d}_{i}_masked.{SAVE_FORMAT}")
+                    )
+                    or not os.path.exists(
+                        os.path.join(cropped_image_save_dir, f"{prompt['index']:06d}_{i}.{SAVE_FORMAT}")
+                    )
                 ):
                     continue
                 packed_prompts.append(
@@ -775,27 +895,10 @@ def pack_prompts(
                     }
                 )
 
-    elif task == "cal_dino_score":
-        for prompt in prompts:
-            packed_prompts.append(prompt)
-
     else:
         raise ValueError(f"{task} not found")
 
     return packed_prompts
-
-
-def crop_composite_images(items, image_dir, output_dir):
-    # use annotated bbox to crop composite images
-    for item in tqdm(items, desc="Cropping composite images using annotated bboxes"):
-        for i, bbox in enumerate(item["bbox"]):
-            if bbox is None:
-                continue
-            image_path = os.path.join(image_dir, f"{item['index']:06d}.png")
-            image = Image.open(image_path).convert("RGB")
-            cropped_image = image.crop(bbox)
-            output_path = os.path.join(output_dir, f"{item['index']:06d}_{i}.png")
-            cropped_image.save(output_path)
 
 
 if __name__ == "__main__":
@@ -808,13 +911,9 @@ if __name__ == "__main__":
         default="generate_reference_images",
         choices=[
             "generate_reference_images",
-            "crop_reference_images",
             "segment_reference_images",
             "generate_composite_images",
             "annotate_images",
-            "crop_composite_images",
-            "segment_instance_images",
-            "cal_dino_score",
             "filter_prompts",
         ],
         help="Task to perform",
@@ -839,7 +938,7 @@ if __name__ == "__main__":
         )
         print(f"Images saved to {reference_image_dir}")
 
-    elif args.task == "crop_reference_images":
+    elif args.task == "segment_reference_images":
         cropped_image_dir = os.path.join(DATASET_DIR_2, "reference_masks")
         if not os.path.exists(cropped_image_dir):
             os.makedirs(cropped_image_dir)
@@ -849,34 +948,14 @@ if __name__ == "__main__":
         processed_prompts = pack_prompts(
             prompts, image_save_dir=reference_image_dir, cropped_image_save_dir=cropped_image_dir, task=args.task
         )
-        print(f"Total prompts to crop: {len(processed_prompts)}")
-        parallel_crop_images(
+        print(f"Total prompts to segment: {len(processed_prompts)}")
+        parallel_segment_reference_images(
             items=processed_prompts,
             image_dir=reference_image_dir,
             output_dir=cropped_image_dir,
             num_processes=torch.cuda.device_count(),
         )
-        print(f"Cropped images saved to {cropped_image_dir}")
-
-    elif args.task == "segment_reference_images":
-        segmented_image_dir = os.path.join(DATASET_DIR_2, "reference_masks")
-        if not os.path.exists(segmented_image_dir):
-            os.makedirs(segmented_image_dir)
-
-        with open(prompt_save_path, "r") as f:
-            prompts = json.load(f)
-        prompts = pack_prompts(
-            prompts, image_save_dir=reference_image_dir, masked_image_save_dir=segmented_image_dir, task=args.task
-        )
-        print(f"Total prompts to segment reference images: {len(prompts)}")
-        parallel_segment_images(
-            packed_prompts=prompts,
-            image_save_dir=segmented_image_dir,
-            masked_image_save_dir=segmented_image_dir,
-            batch_size=64,
-            num_gpus=torch.cuda.device_count(),
-        )
-        print(f"Segmented reference images saved to {segmented_image_dir}")
+        print(f"Segmented images saved to {cropped_image_dir}")
 
     elif args.task == "generate_composite_images":
         composite_image_dir = os.path.join(DATASET_DIR_2, "composite_images")
@@ -900,9 +979,12 @@ if __name__ == "__main__":
     elif args.task == "annotate_images":
         annotated_image_dir = os.path.join(DATASET_DIR_2, "annotated_images")
         composite_image_dir = os.path.join(DATASET_DIR_2, "composite_images")
+        aligned_face_save_dir = os.path.join(DATASET_DIR_2, "aligned_faces")
         ref_image_dir = os.path.join(DATASET_DIR_2, "reference_masks")
-        if not os.path.exists(annotated_image_dir):
-            os.makedirs(annotated_image_dir)
+        instance_image_dir = os.path.join(DATASET_DIR_2, "instance_masks")
+        os.makedirs(annotated_image_dir, exist_ok=True)
+        os.makedirs(aligned_face_save_dir, exist_ok=True)
+        os.makedirs(instance_image_dir, exist_ok=True)
 
         with open(os.path.join(DATASET_DIR_2, "prompts.json"), "r") as f:
             prompts = json.load(f)
@@ -913,6 +995,8 @@ if __name__ == "__main__":
             image_dir=composite_image_dir,
             ref_image_dir=ref_image_dir,
             annotated_image_save_dir=annotated_image_dir,
+            masked_instance_save_dir=instance_image_dir,
+            aligned_face_save_dir=aligned_face_save_dir,
             num_processes=torch.cuda.device_count(),
         )
         print(f"Annotated images saved to {annotated_image_dir}")
@@ -921,69 +1005,10 @@ if __name__ == "__main__":
             json.dump(annotated_prompts, f, indent=2)
         print(f"Prompts with bounding boxes saved to {os.path.join(DATASET_DIR_2, 'prompts_with_bboxes.json')}")
 
-    elif args.task == "crop_composite_images":
-        composite_image_dir = os.path.join(DATASET_DIR_2, "composite_images")
-        cropped_image_dir = os.path.join(DATASET_DIR_2, "instance_masks")
-        if not os.path.exists(cropped_image_dir):
-            os.makedirs(cropped_image_dir)
-
-        with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
-            prompts = json.load(f)
-        prompts = pack_prompts(
-            prompts, image_save_dir=composite_image_dir, cropped_image_save_dir=cropped_image_dir, task=args.task
-        )
-        print(f"Total prompts to crop: {len(prompts)}")
-        crop_composite_images(
-            items=prompts,
-            image_dir=composite_image_dir,
-            output_dir=cropped_image_dir,
-        )
-        print(f"Cropped composite images saved to {cropped_image_dir}")
-
-    elif args.task == "segment_instance_images":
-        segmented_image_dir = os.path.join(DATASET_DIR_2, "instance_masks")
-        if not os.path.exists(segmented_image_dir):
-            os.makedirs(segmented_image_dir)
-
-        with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
-            prompts = json.load(f)
-        prompts = pack_prompts(
-            prompts, image_save_dir=segmented_image_dir, masked_image_save_dir=segmented_image_dir, task=args.task
-        )
-        print(f"Total prompts to segment instance images: {len(prompts)}")
-        parallel_segment_images(
-            packed_prompts=prompts,
-            image_save_dir=segmented_image_dir,
-            masked_image_save_dir=segmented_image_dir,
-            batch_size=64,
-            num_gpus=torch.cuda.device_count(),
-        )
-        print(f"Segmented instance images saved to {segmented_image_dir}")
-
-    elif args.task == "cal_dino_score":
-        ref_image_dir = os.path.join(DATASET_DIR_2, "reference_masks")
-        ref_mask_dir = os.path.join(DATASET_DIR_2, "reference_masks")
-        target_image_dir = os.path.join(DATASET_DIR_2, "instance_masks")
-        target_mask_dir = os.path.join(DATASET_DIR_2, "instance_masks")
-
-        with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
-            prompts = json.load(f)
-        prompts_with_scores = parallel_cal_dino_score(
-            prompts=prompts,
-            ref_image_dir=ref_image_dir,
-            ref_mask_dir=ref_mask_dir,
-            target_image_dir=target_image_dir,
-            target_mask_dir=target_mask_dir,
-            num_processes=torch.cuda.device_count(),
-        )
-        with open(os.path.join(DATASET_DIR_2, "prompts_with_dino_scores.json"), "w") as f:
-            json.dump(prompts_with_scores, f, indent=2)
-        print(f"Prompts with DINO scores saved to {os.path.join(DATASET_DIR_2, 'prompts_with_dino_scores.json')}")
-
     elif args.task == "filter_prompts":
         dino_score_threshold = 0.75
         face_score_threshold = 0.6
-        with open(os.path.join(DATASET_DIR_2, "prompts_with_dino_scores.json"), "r") as f:
+        with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
             prompts = json.load(f)
         filtered_prompts = filter_prompts(
             prompts,

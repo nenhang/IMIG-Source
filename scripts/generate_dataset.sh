@@ -50,7 +50,7 @@ python src/generate_dataset.py --task generate_images || \
     exit_on_error "generate_images failed"
 
 # Annotate generated images with bounding boxes
-python src/generate_dataset.py --task annotate_images || \
+conda activate imig-tool || python src/generate_dataset.py --task annotate_images || \
     exit_on_error "annotate_images failed"
 
 # Crop objects based on bounding boxes
@@ -58,18 +58,18 @@ python src/generate_dataset.py --task crop_images || \
     exit_on_error "crop_images failed"
 
 # Repaint instances with Kontext
-python src/generate_dataset.py --task repaint_with_kontext || \
+conda activate imig-gen || python src/generate_dataset.py --task repaint_with_kontext || \
     exit_on_error "repaint_with_kontext failed"
 
 # Validate bounding boxes after repainting
-python src/generate_dataset.py --task get_valid_bboxes || \
+conda activate imig-tool || python src/generate_dataset.py --task get_valid_bboxes || \
     exit_on_error "get_valid_bboxes failed"
 
 # ==================== PHASE 2: Image Segmentation ====================
 log "=== Starting Phase 2: Image Segmentation ==="
 
 # Switch to the tool environment for segmentation tasks
-conda activate imig-tool || exit_on_error "Failed to activate imig-tool environment"
+exit_on_error "Failed to activate imig-tool environment"
 
 # Segment object instances from cropped images
 python src/generate_dataset.py --task segment_instance_images || \

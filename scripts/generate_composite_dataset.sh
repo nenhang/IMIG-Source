@@ -44,10 +44,6 @@ conda activate imig-gen || exit_on_error "Failed to activate imig-gen environmen
 python src/generate_composite_dataset.py --task generate_reference_images || \
     exit_on_error "generate_reference_images failed"
 
-# Crop objects from reference images
-python src/generate_composite_dataset.py --task crop_reference_images || \
-    exit_on_error "crop_reference_images failed"
-
 # ==================== PHASE 2: Reference Image Segmentation ====================
 log "=== Starting Phase 2: Reference Image Segmentation ==="
 
@@ -66,31 +62,17 @@ conda activate imig-gen || exit_on_error "Failed to activate imig-gen environmen
 python src/generate_composite_dataset.py --task generate_composite_images || \
     exit_on_error "generate_composite_images failed"
 
+conda activate imig-tool || exit_on_error "Failed to activate imig-tool environment"
+
+# ==================== PHASE 4: Composite Image Segmentation ====================
+
 # Annotate composite images with bounding boxes
 python src/generate_composite_dataset.py --task annotate_images || \
     exit_on_error "annotate_images failed"
 
-# Crop objects from composite images
-python src/generate_composite_dataset.py --task crop_composite_images || \
-    exit_on_error "crop_composite_images failed"
-
-# ==================== PHASE 4: Composite Image Segmentation ====================
-log "=== Starting Phase 4: Composite Image Segmentation ==="
-
-conda activate imig-tool || exit_on_error "Failed to activate imig-tool environment"
-
-# Segment instances from composite images
-python src/generate_composite_dataset.py --task segment_instance_images || \
-    exit_on_error "segment_instance_images failed"
-
 # ==================== PHASE 5: Quality Assessment ====================
 log "=== Starting Phase 5: Quality Assessment ==="
-
 conda activate imig-gen || exit_on_error "Failed to activate imig-gen environment"
-
-# Calculate DINO similarity scores
-python src/generate_composite_dataset.py --task cal_dino_score || \
-    exit_on_error "cal_dino_score failed"
 
 # Filter final dataset
 python src/generate_composite_dataset.py --task filter_prompts || \

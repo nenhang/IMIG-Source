@@ -24,8 +24,8 @@ from PIL import Image
 from huggingface_hub import hf_hub_download
 from torchvision.transforms.functional import normalize
 
-from tools import BEN2
-from facexlib.utils.face_restoration_helper import FaceRestoreHelper
+# from tools import BEN2
+# from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 from dreamo.dreamo_pipeline import DreamOPipeline
 from dreamo.utils import (
     get_device,

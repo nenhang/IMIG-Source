@@ -1,11 +1,13 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 
+import cv2
 import mmcv
 import numpy as np
 import pycocotools.mask as maskUtils
 import torch
 from mmcv.parallel import collate
+from PIL import Image
 
 from deris.datasets import extract_data
 from tools.demo import DERIS
@@ -64,11 +66,30 @@ class ParallelDeris(DERIS):
     def __init__(self, args):
         super().__init__(args)
 
-    def preprocess_image(self, img_path, expression):
+    def preprocess_image(self, img_path_or_pil, expression):
         results = {}
-        img_bytes = self.file_client.get(img_path)
-        image = mmcv.imfrombytes(img_bytes, flag="color", backend=None)
-        results["filename"] = img_path
+
+        # 情况1：输入是PIL.Image对象
+        if isinstance(img_path_or_pil, Image.Image):
+            # 从PIL.Image转换为BGR numpy数组（OpenCV格式）
+            image = np.array(img_path_or_pil)
+            if image.ndim == 3:  # 确保颜色通道顺序正确（PIL是RGB，需转BGR）
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            results["filename"] = None  # 无文件路径时设为None
+
+        # 情况2：输入是文件路径字符串
+        elif isinstance(img_path_or_pil, str):
+            img_bytes = self.file_client.get(img_path_or_pil)
+            image = mmcv.imfrombytes(img_bytes, flag="color", backend=None)
+            results["filename"] = img_path_or_pil
+
+        else:
+            raise TypeError("Input must be either PIL.Image or file path string")
+
+        # img_bytes = self.file_client.get(img_path)
+        # image = mmcv.imfrombytes(img_bytes, flag="color", backend=None)
+        # results["filename"] = img_path
+
         results["img"] = image
         results["img_shape"] = image.shape
         results["ori_shape"] = image.shape

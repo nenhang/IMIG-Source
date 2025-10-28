@@ -78,3 +78,13 @@ def normed_cxcywh_to_pixel_xyxy(bbox, width=1024, height=1024, return_dtype="ten
         bbox_normed_xyxy = ((x0 / width).item(), (y0 / height).item(), (x1 / width).item(), (y1 / height).item())
 
     return bbox_pixel_xyxy, bbox_normed_xyxy
+
+
+def norm_bbox_to_tensor(bbox, image_width, image_height):
+    bbox_normed = [
+        bbox[0] / image_width,
+        bbox[1] / image_height,
+        bbox[2] / image_width,
+        bbox[3] / image_height,
+    ]
+    return torch.tensor(bbox_normed, dtype=torch.float32)

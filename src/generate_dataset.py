@@ -21,6 +21,7 @@ from environ_config import (
 )
 
 PROMPT_PATH = os.path.join(DATASET_DIR, "prompts.json")
+SAVE_FORMAT = "jpg"
 
 # feel free to customize your own template and probabilities
 KONTEXT_EDIT_PROMPT_TEMPLATE = [
@@ -143,19 +144,10 @@ def generate_image(prompts, flux_model, save_dir, batch_size=16, use_turbo=True,
             ).images
         for j, img in enumerate(imgs):
             idx = prompt_batch[j]["index"]
-            if os.path.exists(f"{save_dir}/{idx:06}.png"):
-                print(f"GPU {gpu_id} Warning: {idx:06}.png already exists!")
-            img.save(f"{save_dir}/{idx:06}.png")
+            img.save(f"{save_dir}/{idx:06}.{SAVE_FORMAT}")
 
 
-def annotate_images(
-    prompts,
-    image_save_dir,
-    prompt_save_path,
-    dino_model=None,
-    gpu_id=None,
-    process_id=0,
-):
+def annotate_images(prompts, image_save_dir, prompt_save_path, dino_model=None, gpu_id=None, process_id=0):
     torch.cuda.set_device(gpu_id)
     if dino_model is None:
         from groundingdino.config import GroundingDINO_SwinT_OGC
@@ -170,14 +162,14 @@ def annotate_images(
     )
     for i, p in enumerate(tqdm(prompts)):
         p["reference_images"] = []
-        img_path = f"{image_save_dir}/{p['index']:06d}.png"
+        img_path = f"{image_save_dir}/{p['index']:06d}.{SAVE_FORMAT}"
         img = Image.open(img_path)
         annotated_img, bboxes, phrases = get_objects(img, p["nouns"], dino_model)
         for idx, bbox in enumerate(bboxes):
             p["reference_images"].append({"bbox": bbox.cpu().numpy().tolist(), "index": idx, "phrase": phrases[idx]})
         annotated_img = annotated_img[..., ::-1]
         annotated_img = Image.fromarray(annotated_img)
-        annotated_img.save(f"{image_save_dir}/{p['index']:06d}_annotated.png")
+        annotated_img.save(f"{image_save_dir}/{p['index']:06d}_annotated.{SAVE_FORMAT}")
 
     # save prompts with reference_images
     with open(prompt_save_path, "w") as f:
@@ -356,7 +348,7 @@ def repaint_with_kontext_work_process(prompts_chunk, image_dir, image_save_dir, 
             batch_images = []
             batch_prompts = []
             for segment in batch_segments:
-                img_path = f"{image_dir}/{segment['index']:06d}.png"
+                img_path = f"{image_dir}/{segment['index']:06d}.{SAVE_FORMAT}"
                 img = Image.open(img_path)
                 bbox = segment["bbox"]
                 ref_img = img.crop(bbox)
@@ -376,7 +368,7 @@ def repaint_with_kontext_work_process(prompts_chunk, image_dir, image_save_dir, 
             ).images
 
             for j, segment in enumerate(batch_segments):
-                save_image_path = f"{image_save_dir}/{segment['index']:06d}_{segment['segment_index']}.png"
+                save_image_path = f"{image_save_dir}/{segment['index']:06d}_{segment['segment_index']}.{SAVE_FORMAT}"
                 output_image = output_images[j]
                 output_image.save(save_image_path)
 
@@ -470,12 +462,12 @@ def crop_images(
         raise RuntimeError("CUDA is not available, cannot run parallel crop images")
 
     for p in tqdm(raw_prompts):
-        img_path = f"{image_dir}/{p['index']:06d}.png"
+        img_path = f"{image_dir}/{p['index']:06d}.{SAVE_FORMAT}"
         img = Image.open(img_path)
         for ref in p["reference_images"]:
             bbox = ref["bbox"]
             ref_img = img.crop(bbox)
-            save_image_path = f"{crop_image_save_dir}/{p['index']:06d}_{ref['index']}.png"
+            save_image_path = f"{crop_image_save_dir}/{p['index']:06d}_{ref['index']}.{SAVE_FORMAT}"
             ref_img.save(save_image_path)
 
 
@@ -502,7 +494,7 @@ def gen_instance_bboxes_processor(
     for item in tqdm(data, desc=f"Process {process_id} on GPU {gpu_id}"):
         reference_images = item["reference_images"]
         for ref_idx, ref in enumerate(reference_images):
-            ref_image_path = os.path.join(image_root, f"{item['index']:06d}_{ref['index']}.png")
+            ref_image_path = os.path.join(image_root, f"{item['index']:06d}_{ref['index']}.{SAVE_FORMAT}")
             if not os.path.exists(ref_image_path):
                 raise FileNotFoundError(f"Reference image not found: {ref_image_path}")
             ref_image_source, ref_image = load_image(ref_image_path)
@@ -608,7 +600,7 @@ def filter_data(
         orig_data = json.load(f)
 
     filtered_data = []
-    image_0_path = os.path.join(dataset_root, "data", "000000.png")
+    image_0_path = os.path.join(dataset_root, "data", f"000000.{SAVE_FORMAT}")
     main_image = Image.open(image_0_path).convert("RGB")
     orig_area = main_image.width * main_image.height
     for item in tqdm(orig_data, desc="Filtering data"):
@@ -629,16 +621,40 @@ def filter_data(
         exclude_list = []
         for ref_idx, ref in enumerate(reference_images):
             repainted_mask_path = os.path.join(
-                masked_instance_image_root, f"{item['index']:06d}_{ref['index']}_masked.png"
+                masked_instance_image_root,
+                f"{item['index']:06d}_{ref['index']}_masked.png"
+                if SAVE_FORMAT == "png"
+                else (
+                    f"{item['index']:06d}_{ref['index']}_mask.jpg"
+                    if os.path.exists(
+                        os.path.join(masked_instance_image_root, f"{item['index']:06d}_{ref['index']}_mask.jpg")
+                    )
+                    else f"{item['index']:06d}_{ref['index']}_masked.png"  # may in 1-bit png format
+                ),
             )
             repainted_ref_mask_path = os.path.join(
-                masked_repainted_image_root, f"{item['index']:06d}_{ref['index']}_masked.png"
+                masked_repainted_image_root,
+                f"{item['index']:06d}_{ref['index']}_masked.png"
+                if SAVE_FORMAT == "png"
+                else (
+                    f"{item['index']:06d}_{ref['index']}_mask.jpg"
+                    if os.path.exists(
+                        os.path.join(masked_repainted_image_root, f"{item['index']:06d}_{ref['index']}_mask.jpg")
+                    )
+                    else f"{item['index']:06d}_{ref['index']}_masked.png"  # may in 1-bit png format
+                ),
             )
             if min_mask_ratio is not None or min_fit_ratio is not None:
-                masked_image = Image.open(repainted_mask_path).convert("RGBA")
-                mask_image_np = np.array(masked_image.split()[-1])
-                repainted_masked_image = Image.open(repainted_ref_mask_path).convert("RGBA")
-                repainted_mask_image_np = np.array(repainted_masked_image.split()[-1])
+                if SAVE_FORMAT == "png":
+                    masked_image = Image.open(repainted_mask_path).convert("RGBA")
+                    mask_image_np = np.array(masked_image.split()[-1])
+                    repainted_masked_image = Image.open(repainted_ref_mask_path).convert("RGBA")
+                    repainted_mask_image_np = np.array(repainted_masked_image.split()[-1])
+                else:
+                    mask_image = Image.open(repainted_mask_path).convert("L")
+                    mask_image_np = np.array(mask_image)
+                    repainted_mask_image = Image.open(repainted_ref_mask_path).convert("L")
+                    repainted_mask_image_np = np.array(repainted_mask_image)
             if min_mask_ratio is not None:
                 if (
                     np.sum(mask_image_np > 0) / mask_image_np.size < min_mask_ratio
@@ -722,7 +738,7 @@ def segment_images(packed_prompts, image_save_dir, masked_image_save_dir, batch_
         images = []
         expressions = []
         for item in batch_items:
-            image_path = f"{image_save_dir}/{item['image_idx']:06d}_{item['segment_idx']}.png"
+            image_path = f"{image_save_dir}/{item['image_idx']:06d}_{item['segment_idx']}.{SAVE_FORMAT}"
             images.append(image_path)
             expressions.append(item["phrase"])
 
@@ -737,10 +753,18 @@ def segment_images(packed_prompts, image_save_dir, masked_image_save_dir, batch_
 
         for i, (image, mask) in enumerate(zip(images, pred_masks)):
             save_path = f"{masked_image_save_dir}/{batch_items[i]['image_idx']:06d}_{batch_items[i]['segment_idx']}"
-            mask_pil = Image.fromarray((mask * 255).astype(np.uint8)).convert("L")
-            ref_image = Image.open(image).convert("RGBA")
-            ref_image.putalpha(mask_pil)
-            ref_image.save(f"{save_path}_masked.png")
+            mask_pil = Image.fromarray((mask * 255).astype(np.uint8))
+            if SAVE_FORMAT == "png":
+                ref_image = Image.open(image).convert("RGBA")
+                ref_image.putalpha(mask_pil.convert("L"))
+                ref_image.save(f"{save_path}_masked.png")
+            else:
+                # mask_pil.save(f"{save_path}_mask.jpg")
+                mask_pil.convert("1").save(f"{save_path}_mask.png")  # 1 bit png mask, less space
+                ref_image = Image.open(image).convert("RGB")
+                white_bg = Image.new("RGB", ref_image.size, (255, 255, 255))
+                masked_image = Image.composite(ref_image, white_bg, mask_pil)
+                masked_image.save(f"{save_path}_masked.jpg")
 
     # switch back to original directory
     os.chdir(current_dir)
@@ -783,14 +807,14 @@ def filter_exists_prompts(raw_prompts, target_dir, target_dir_2=None, task="gene
     filtered_prompts = []
     if task == "generate_images":
         for p in tqdm(raw_prompts):
-            if not os.path.exists(f"{target_dir}/{p['index']:06d}.png"):
+            if not os.path.exists(f"{target_dir}/{p['index']:06d}.{SAVE_FORMAT}"):
                 filtered_prompts.append(p)
     elif task == "annotate_images":
         for p in tqdm(raw_prompts):
-            if not os.path.exists(f"{target_dir}/{p['index']:06d}.png"):
-                print(f"Warning: Image {target_dir}/{p['index']:06d}.png does not exist for annotation!")
+            if not os.path.exists(f"{target_dir}/{p['index']:06d}.{SAVE_FORMAT}"):
+                print(f"Warning: Image {target_dir}/{p['index']:06d}.{SAVE_FORMAT} does not exist for annotation!")
                 continue
-            if not os.path.exists(f"{target_dir_2}/{p['index']:06d}_annotated.png"):
+            if not os.path.exists(f"{target_dir_2}/{p['index']:06d}_annotated.{SAVE_FORMAT}"):
                 filtered_prompts.append(p)
     elif task == "repaint_with_kontext" or task == "repaint_with_redux":
         total_instances = 0
@@ -803,7 +827,7 @@ def filter_exists_prompts(raw_prompts, target_dir, target_dir_2=None, task="gene
             new_p["reference_images"] = []
             for ref in p["reference_images"]:
                 total_instances += 1
-                save_image_path = f"{target_dir}/{p['index']:06d}_{ref['index']}.png"
+                save_image_path = f"{target_dir}/{p['index']:06d}_{ref['index']}.{SAVE_FORMAT}"
                 if not os.path.exists(save_image_path):
                     new_p["reference_images"].append(ref)
                     filtered_instances += 1
@@ -818,12 +842,11 @@ def filter_exists_prompts(raw_prompts, target_dir, target_dir_2=None, task="gene
             skipped_instance_count = 0
             missing_instance_count = 0
             for ref in p["reference_images"]:
-                from_path = os.path.join(target_dir, f"{p['index']:06d}_{ref['index']}.png")
+                from_path = os.path.join(target_dir, f"{p['index']:06d}_{ref['index']}.{SAVE_FORMAT}")
                 if not os.path.exists(from_path):
                     missing_instance_count += 1
                     continue
-                save_prefix = os.path.join(target_dir_2, f"{p['index']:06d}_{ref['index']}")
-                if os.path.exists(f"{save_prefix}_masked.png"):
+                if os.path.exists(os.path.join(target_dir_2, f"{p['index']:06d}_{ref['index']}_masked.{SAVE_FORMAT}")):
                     skipped_instance_count += 1
                     continue
                 filtered_prompts.append(
