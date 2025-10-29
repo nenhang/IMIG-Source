@@ -1,8 +1,10 @@
-# IMIG-Source
+# IMIG-Dataset
+
+## 📝 Introduction
 
 ![Dataset Sample](./docs/dataset_sample.webp)
 
-This repository is the official implementation of the generation code for the IMIG-Dataset proposed in paper [**ContextGen: Contextual Layout Anchoring for Identity-Consistent Multi-Instance Generation**](https://arxiv.org/abs/2510.11000). The IMIG-Dataset is a large-scale, structured dataset designed for identity-consistent **I**mage-guided **M**ulti-instance **G**eneration tasks, featuring progressive difficulty levels. The main repository for the paper is at [here](https://github.com/nenhang/ContextGen).
+This repository is the official implementation of the generation code for the **IMIG-Dataset** proposed in paper [**ContextGen: Contextual Layout Anchoring for Identity-Consistent Multi-Instance Generation**](https://arxiv.org/abs/2510.11000). The IMIG-Dataset is a large-scale, structured dataset designed for identity-consistent **I**mage-guided **M**ulti-**I**nstance **G**eneration tasks, featuring progressive difficulty levels. The main repository for the paper is at [here](https://github.com/nenhang/ContextGen).
 
 ## 🛠️ Setup
 
