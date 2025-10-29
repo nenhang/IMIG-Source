@@ -27,8 +27,6 @@ In our implementation, we use [FLUX family](https://github.com/black-forest-labs
     pip install -r requirements.txt
     ```
 
-    > if you encounter issues when installing GroundingDINO using `pip install -e .`, such as `ModuleNotFoundError: No module named 'pip'`, you can try installing with `pip install -e . --no-build-isolation --config-settings editable_mode=strict`.
-
 2. Create the second conda environment `imig-tool` for DeRIS, which requires torch ~= 2.0 and a lower CUDA version (like 11.8). You may need to switch CUDA (or NVCC) versions if you find CUDA 12+ incompatible with DeRIS.
 
     ```bash
@@ -47,7 +45,7 @@ In our implementation, we use [FLUX family](https://github.com/black-forest-labs
     sh make.sh
     ```
 
-    > If you encounter issues in `make.sh`, you may check if your python, CUDA and PyTorch versions are compatible. Higher versions are likely to cause issues.
+    > if you encounter issues when installing GroundingDINO using `pip install -e .`, such as `ModuleNotFoundError: No module named 'pip'`, you can try installing with `pip install -e . --no-build-isolation --config-settings editable_mode=strict`. If you encounter issues in `make.sh`, you may check if your python, CUDA and PyTorch versions are compatible. Higher versions are likely to cause issues.
 
 3. Download all the pre-trained models' weights used in our code. All the download links and Huggingface URLs are provided in the [`environ_config_template.py`](./environ_config_template.py) file. After downloading, please modify the paths in `environ_config_template.py` accordingly. Then refer to [`third_party/DeRIS/README.md`](./third_party/DeRIS/README.md) to download the model weights required by DeRIS and place them under `third_party/DeRIS/pretrain_weights/` as follows:
 
