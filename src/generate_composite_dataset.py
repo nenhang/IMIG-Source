@@ -520,6 +520,8 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
     face_count = 0
     item_wo_face = 0
 
+    instance_number_distribution = {}
+
     # filter prompts with None in bbox
     for p in tqdm(prompts, desc="Filtering None bboxes and calculating initial average scores"):
         contain_face = False
@@ -593,12 +595,18 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
         else:
             item_wo_face += 1
 
+        instance_num = valid_instance_count
+        if instance_num not in instance_number_distribution:
+            instance_number_distribution[instance_num] = 0
+        instance_number_distribution[instance_num] += 1
+
         filtered_prompts.append(p)
 
     print(
         f"Prompts count after removing invalid bboxes: {len(filtered_prompts)}\n"
         f"Average DINO score before filtering: {sum_dino_score / obj_count if obj_count > 0 else 0:.4f} over {obj_count} references, {item_wo_face} items\n"
         f"Average Face score before filtering: {sum_face_score / face_count if face_count > 0 else 0:.4f} over {face_count} references, {item_with_face} items\n"
+        f"Instance number distribution before filtering: {instance_number_distribution}"
     )
 
     sum_dino_score = 0.0
@@ -607,6 +615,8 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
     sum_face_score = 0.0
     face_count = 0
     item_wo_face = 0
+
+    instance_number_distribution = {}
 
     filtered_prompts_2 = []
     for p in tqdm(
@@ -627,8 +637,12 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
             continue
 
         # filter bboxes and cal new scores
-        p["bbox"] = [p["bbox"][i] if i in available_indices else None for i in range(len(p["bbox"]))]
-        p["face_bbox"] = [p["face_bbox"][i] if i in available_indices else None for i in range(len(p["face_bbox"]))]
+        p["instance"] = [p["instance"][i] for i in available_indices]
+        p["instance_prompt"] = [p["instance_prompt"][i] for i in available_indices]
+        p["bbox"] = [p["bbox"][i] for i in available_indices]
+        p["face_bbox"] = [p["face_bbox"][i] for i in available_indices]
+        p["indices"] = available_indices
+
         for i, (bbox, face_bbox) in enumerate(zip(p["bbox"], p["face_bbox"])):
             if bbox is not None:
                 sum_dino_score += bbox["score"]
@@ -644,12 +658,18 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
             item_wo_face += 1
 
         filtered_prompts_2.append(p)
+        instance_num = len(available_indices)
+        if instance_num not in instance_number_distribution:
+            instance_number_distribution[instance_num] = 0
+        instance_number_distribution[instance_num] += 1
+
     filtered_prompts = filtered_prompts_2
 
     print(
         f"Number of prompts after filtering: {len(filtered_prompts)}\n"
         f"Average DINO score after filtering: {sum_dino_score / obj_count if obj_count > 0 else 0:.4f} over {obj_count} references, {item_wo_face} items\n"
-        f"Average Face score after filtering: {sum_face_score / face_count if face_count > 0 else 0:.4f} over {face_count} references, {item_with_face} items"
+        f"Average Face score after filtering: {sum_face_score / face_count if face_count > 0 else 0:.4f} over {face_count} references, {item_with_face} items\n"
+        f"Instance number distribution after filtering: {instance_number_distribution}"
     )
 
     return filtered_prompts
@@ -1007,7 +1027,7 @@ if __name__ == "__main__":
 
     elif args.task == "filter_prompts":
         dino_score_threshold = 0.75
-        face_score_threshold = 0.6
+        face_score_threshold = 0.65
         with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
             prompts = json.load(f)
         filtered_prompts = filter_prompts(

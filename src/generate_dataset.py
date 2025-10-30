@@ -58,6 +58,7 @@ def get_prompts(prompts_path, start_idx: int = 0, length=None):
         if os.path.isfile(prompts_path):
             with open(prompts_path, "r") as f:
                 items = json.load(f)
+                print(f"Load {len(items)} prompts from {prompts_path}")
         elif os.path.isdir(prompts_path):
             items = []
             with os.scandir(prompts_path) as it:
