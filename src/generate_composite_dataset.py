@@ -631,6 +631,7 @@ def filter_prompts(prompts, dino_score_threshold, face_score_threshold, min_vali
                 and bbox["score"] >= dino_score_threshold
                 or face_bbox is not None
                 and face_bbox["score"] >= face_score_threshold
+                and face_bbox["aligned_face_bbox"] is not None
             ):
                 available_indices.append(i)
         if len(available_indices) < min_valid_instance_count:
@@ -1026,7 +1027,7 @@ if __name__ == "__main__":
         print(f"Prompts with bounding boxes saved to {os.path.join(DATASET_DIR_2, 'prompts_with_bboxes.json')}")
 
     elif args.task == "filter_prompts":
-        dino_score_threshold = 0.75
+        dino_score_threshold = 0.82
         face_score_threshold = 0.65
         with open(os.path.join(DATASET_DIR_2, "prompts_with_bboxes.json"), "r") as f:
             prompts = json.load(f)
